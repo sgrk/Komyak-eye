@@ -74,7 +74,7 @@ public:
       cfg.invert = true;             // パネルの明暗が反転してる場合 true
       cfg.rgb_order = false;         // パネルの赤と青が入れ替わってる場合 true
       cfg.dlen_16bit = false;        // 16bitパラレルやSPIでデータ長を16bit単位で送信する場合 true
-      cfg.bus_shared = true;         // SDカードとバスを共有する場合 true
+      cfg.bus_shared = false;         // SDカードとバスを共有する場合 true
       
       _panel_instance.config(cfg);
     }
