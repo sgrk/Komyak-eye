@@ -107,21 +107,34 @@ const int SCREEN_HEIGHT = 240;
 const int BUFFER_SIZE = (SCREEN_WIDTH * SCREEN_HEIGHT + 7) / 8;
 // Center coordinates
 const int CENTER_X = 120;
-const int CENTER_Y = R;  // Shifted upward by 120-R pixels
+const int CENTER_Y = min(120,R+10);  // Shifted upward by 120-R pixels
 
 /* --- Eye Movement Patterns -------------------------------------- */
 // パターン関連の定数
-const int PATTERN_COUNT = 5;  // パターンの総数
+const int PATTERN_COUNT = 2;  // パターンの総数 (0: 移動, 1: じっと見つめる)
 const unsigned long PATTERN_CHANGE_INTERVAL = 10000;  // パターン切り替え間隔（ミリ秒）
 
 // パターンの重み（確率）を定義
-// パターン0（スパイラル）: 20%, パターン1（ランダム）: 10%, パターン2（左右）: 10%, 
-// パターン3（上下）: 10%, パターン4（じっと見つめる）: 50%
-const int PATTERN_WEIGHTS[] = {20, 10, 10, 10, 50};  // 合計100になるようにする
+// パターン0（移動）: 30%, パターン1（じっと見つめる）: 70%
+const int PATTERN_WEIGHTS[] = {30, 70};  // 合計100になるようにする
 
 // パターン関連の変数
-int currentPattern = 0;  // 現在のパターン（0: スパイラル, 1: ランダム, 2: 左右, 3: 上下, 4: じっと見つめる）
+int currentPattern = 0;  // 現在のパターン（0: 移動, 1: じっと見つめる）
+int previousPattern = 0; // 前回のパターン（モード変更時の位置共有用）
 unsigned long lastPatternChangeTime = 0;  // 最後にパターンを変更した時間
+
+// 移動パターン用の変数
+float targetDistance = 0.0f;  // 目標距離 (3/5*r から R-r*B_MIN の範囲)
+float targetAngle = 0.0f;     // 目標角度 (ラジアン)
+float currentDistance = 0.0f; // 現在の距離
+float currentAngle = 0.0f;    // 現在の角度 (ラジアン)
+float moveSpeed = 0.0f;       // 移動速度
+bool needNewTarget = true;    // 新しい目標が必要かどうか
+
+// 共有位置情報（モード変更時に使用）
+float sharedPositionX = 0.0f; // 正規化されたX座標 (-1.0〜1.0)
+float sharedPositionY = 0.0f; // 正規化されたY座標 (-1.0〜1.0)
+bool positionInitialized = false; // 位置が初期化されたかどうか
 
 #ifdef TRIG_TABLE
 // Trigonometric lookup tables
@@ -434,6 +447,9 @@ uint16_t* dmaBuffer = NULL;
 /* --- Pattern Selection Function ---------------------------------- */
 // 新しいパターンを重み付き確率で選択する関数
 void selectRandomPattern() {
+  // 現在のパターンを保存
+  previousPattern = currentPattern;
+  
   // 0〜99のランダムな値を生成
   int r = random(100);
   
@@ -457,89 +473,159 @@ void selectRandomPattern() {
 }
 
 /* --- Pattern Movement Functions ---------------------------------- */
-// パターン1: スパイラル状の動き（既存の実装）
-void calculateSpiralPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
-  const float DURATION = 6.0f;                   // seconds
-  float phase = fmod((now - t0)/1000.0f, DURATION) / DURATION;   // 0..1
-  float rho   = (phase < 0.5f) ? phase*2 : (2 - phase*2);        // 0→1→0
-  float theta = TWO_PI * 3 * phase;              // 3 turns
-  
-  // Pre-calculate trig functions (optimization)
-#ifdef TRIG_TABLE
-  float cos_theta = fastCos(theta);
-  float sin_theta = fastSin(theta);
-#else
-  float cos_theta = cosf(theta);
-  float sin_theta = sinf(theta);
-#endif
-  
-  dx = rho * cos_theta;
-  dy = rho * sin_theta;
-}
-
-// パターン2: ランダムな動き
-void calculateRandomPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
-  // 1秒ごとに新しい目標位置を設定
-  static float targetX = 0, targetY = 0;
+// パターン0: 移動パターン（目標位置に向かって移動）
+void calculateMovingPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
   static uint32_t lastTargetChangeTime = 0;
   
-  if (now - lastTargetChangeTime > 1000) {
-    // -0.8〜0.8の範囲でランダムな目標位置を設定（中心から少し離れた位置まで）
-    targetX = random(-80, 81) / 100.0f;
-    targetY = random(-80, 81) / 100.0f;
-    lastTargetChangeTime = now;
+  // パターン変更直後に現在位置を初期化
+  if (previousPattern != currentPattern && positionInitialized) {
+    // 共有された位置情報から現在の距離と角度を計算
+    float dx_actual = (R - r*B_MIN) * sharedPositionX;
+    float dy_actual = (R - r*B_MIN) * sharedPositionY;
+    
+    // 極座標に変換
+    currentDistance = sqrt(dx_actual*dx_actual + dy_actual*dy_actual);
+    if (currentDistance > 0) {
+      currentAngle = atan2(dy_actual, dx_actual);
+    } else {
+      // 中心にいる場合は適当な角度から開始
+      currentAngle = 0;
+      currentDistance = 3.0f * r / 5.0f; // 最小距離から開始
+    }
+    
+    // 新しい目標を設定するフラグを立てる
+    needNewTarget = true;
+    
+    // パターン変更処理完了
+    previousPattern = currentPattern;
+    
+#ifdef DEBUG
+    Serial.println(F("Moving pattern initialized with shared position:"));
+    Serial.print(F("X: ")); Serial.print(sharedPositionX);
+    Serial.print(F(", Y: ")); Serial.println(sharedPositionY);
+#endif
   }
   
-  // 現在位置から目標位置へ徐々に移動（スムージング）
-  static float currentX = 0, currentY = 0;
-  currentX = currentX * 0.9f + targetX * 0.1f;
-  currentY = currentY * 0.9f + targetY * 0.1f;
-  
-  dx = currentX;
-  dy = currentY;
-}
-
-// パターン3: 左右の動き
-void calculateHorizontalPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
-  const float DURATION = 4.0f;  // 左右移動の周期（秒）
-  float phase = fmod((now - t0)/1000.0f, DURATION) / DURATION;
-  
-  // -0.8〜0.8の範囲で左右に動く（サイン波）
-#ifdef TRIG_TABLE
-  dx = 0.8f * fastSin(TWO_PI * phase);
-#else
-  dx = 0.8f * sinf(TWO_PI * phase);
+  // 新しい目標が必要か、または一定時間経過したら新しい目標を設定
+  if (needNewTarget || now - lastTargetChangeTime > 5000) {
+    // 目標距離を3/5*rからR-r*B_MINの範囲でランダムに設定
+    float min_distance = 3.0f * r / 5.0f;
+    float max_distance = R - r * B_MIN;
+    targetDistance = min_distance + random(1000) / 1000.0f * (max_distance - min_distance);
+    
+    // 目標角度を0〜2πの範囲でランダムに設定
+    targetAngle = random(1000) / 1000.0f * TWO_PI;
+    
+    // 移動速度をランダムに設定（0.01〜0.05の範囲）
+    moveSpeed = 0.01f + random(80) / 1000.0f;
+    
+    // 現在位置がまだ初期化されていない場合は初期化
+    if (!positionInitialized) {
+      // 現在位置を取得（dx, dyから極座標に変換）
+      float dx_norm = dx;
+      float dy_norm = dy;
+      
+      // 正規化された座標から実際の距離と角度を計算
+      float dx_actual = (R - r*B_MIN) * dx_norm;
+      float dy_actual = (R - r*B_MIN) * dy_norm;
+      
+      // 極座標に変換
+      currentDistance = sqrt(dx_actual*dx_actual + dy_actual*dy_actual);
+      if (currentDistance > 0) {
+        currentAngle = atan2(dy_actual, dx_actual);
+      } else {
+        // 中心にいる場合は適当な角度から開始
+        currentAngle = 0;
+        currentDistance = min_distance; // 最小距離から開始
+      }
+      
+      positionInitialized = true;
+    }
+    
+    needNewTarget = false;
+    lastTargetChangeTime = now;
+    
+#ifdef DEBUG
+    Serial.println(F("New target set:"));
+    Serial.print(F("Distance: ")); Serial.println(targetDistance);
+    Serial.print(F("Angle: ")); Serial.println(targetAngle);
+    Serial.print(F("Speed: ")); Serial.println(moveSpeed);
 #endif
-  dy = 0;  // 縦方向は動かない
-}
-
-// パターン4: 上下の動き
-void calculateVerticalPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
-  const float DURATION = 3.0f;  // 上下移動の周期（秒）
-  float phase = fmod((now - t0)/1000.0f, DURATION) / DURATION;
+  }
   
-  // -0.7〜0.7の範囲で上下に動く（サイン波）
+  // 現在の角度から目標角度への最短経路を計算
+  float angleDiff = targetAngle - currentAngle;
+  
+  // 角度差を-πからπの範囲に正規化（最短経路を選択）
+  while (angleDiff > PI) angleDiff -= TWO_PI;
+  while (angleDiff < -PI) angleDiff += TWO_PI;
+  
+  // 角度と距離を目標に向かって徐々に更新
+  currentAngle += angleDiff * moveSpeed;
+  
+  // 角度を0〜2πの範囲に正規化
+  while (currentAngle < 0) currentAngle += TWO_PI;
+  while (currentAngle >= TWO_PI) currentAngle -= TWO_PI;
+  
+  // 距離も目標に向かって更新
+  float distanceDiff = targetDistance - currentDistance;
+  currentDistance += distanceDiff * moveSpeed;
+  
+  // 目標に十分近づいたら新しい目標を設定するフラグを立てる
+  if (abs(distanceDiff) < 1.0f && abs(angleDiff) < 0.1f) {
+    needNewTarget = true;
+  }
+  
+  // 極座標から直交座標に変換
 #ifdef TRIG_TABLE
-  dx = 0;  // 横方向は動かない
-  dy = 0.7f * fastSin(TWO_PI * phase);
+  float cos_angle = fastCos(currentAngle);
+  float sin_angle = fastSin(currentAngle);
 #else
-  dx = 0;  // 横方向は動かない
-  dy = 0.7f * sinf(TWO_PI * phase);
+  float cos_angle = cosf(currentAngle);
+  float sin_angle = sinf(currentAngle);
 #endif
+  
+  // 正規化された座標に変換（-1.0〜1.0の範囲）
+  dx = (currentDistance * cos_angle) / (R - r*B_MIN);
+  dy = (currentDistance * sin_angle) / (R - r*B_MIN);
+  
+  // 値の範囲を制限
+  dx = constrain(dx, -1.0f, 1.0f);
+  dy = constrain(dy, -1.0f, 1.0f);
 }
 
-// パターン5: じっと見つめる
+// パターン1: じっと見つめる
 void calculateStarePattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
   // 固定位置を見つめる（少しだけランダムな微動あり）
   static float baseX = 0, baseY = 0;
   static uint32_t lastChangeTime = 0;
+  static bool baseInitialized = false;
   
-  // 10秒ごとに見つめる基本位置を変更
-  if (now - lastChangeTime > 10000 || (baseX == 0 && baseY == 0)) {
-    // -0.3〜0.3の範囲でランダムな位置を設定（中心付近）
-    baseX = random(-30, 31) / 100.0f;
-    baseY = random(-30, 31) / 100.0f;
-    lastChangeTime = now;
+  // パターン変更直後に現在位置を初期化
+  if (previousPattern != currentPattern && positionInitialized) {
+    // 共有された位置を基準位置として使用
+    baseX = sharedPositionX;
+    baseY = sharedPositionY;
+    baseInitialized = true;
+    
+    // パターン変更処理完了
+    previousPattern = currentPattern;
+    
+#ifdef DEBUG
+    Serial.println(F("Stare pattern initialized with shared position:"));
+    Serial.print(F("X: ")); Serial.print(baseX);
+    Serial.print(F(", Y: ")); Serial.println(baseY);
+#endif
+  }
+  
+  // 基準位置がまだ初期化されていない場合は初期化
+  if (!baseInitialized) {
+    // ランダムな基準位置を設定（あまり端に寄りすぎないように）
+    baseX = random(-70, 71) / 100.0f;  // -0.7〜0.7の範囲
+    baseY = random(-70, 71) / 100.0f;
+    baseInitialized = true;
+    
+    positionInitialized = true;
   }
   
   // 微小なランダムな動き（まばたきや微動を表現）
@@ -682,10 +768,19 @@ void loop()
 #endif
 
   /* --- パターン切り替えの処理 ----------------------------------- */
-  // 一定時間ごとにパターンをランダムに切り替え
-  if (now - lastPatternChangeTime > PATTERN_CHANGE_INTERVAL) {
-    selectRandomPattern();
-    lastPatternChangeTime = now;
+  // パターンに応じて切り替え条件を変更
+  if (currentPattern == 1) {
+    // パターン1（じっと見つめる）: 10秒経過でパターン選択に移る
+    if (now - lastPatternChangeTime > PATTERN_CHANGE_INTERVAL) {
+      selectRandomPattern();
+      lastPatternChangeTime = now;
+    }
+  } else if (currentPattern == 0) {
+    // パターン0（移動）: 目標位置に到着したときのみパターン変更可能
+    if (needNewTarget && now - lastPatternChangeTime > PATTERN_CHANGE_INTERVAL) {
+      selectRandomPattern();
+      lastPatternChangeTime = now;
+    }
   }
 
   /* --- 現在のパターンに基づいて動きを計算 ----------------------- */
@@ -693,25 +788,20 @@ void loop()
   
   // 現在のパターンに応じて動きを計算
   switch (currentPattern) {
-    case 0: // スパイラル状の動き
-      calculateSpiralPattern(now, t0, dx, dy);
+    case 0: // 移動パターン
+      calculateMovingPattern(now, t0, dx, dy);
       break;
-    case 1: // ランダムな動き
-      calculateRandomPattern(now, t0, dx, dy);
-      break;
-    case 2: // 左右の動き
-      calculateHorizontalPattern(now, t0, dx, dy);
-      break;
-    case 3: // 上下の動き
-      calculateVerticalPattern(now, t0, dx, dy);
-      break;
-    case 4: // じっと見つめる
+    case 1: // じっと見つめるパターン
       calculateStarePattern(now, t0, dx, dy);
       break;
-    default: // 念のためデフォルトはスパイラル
-      calculateSpiralPattern(now, t0, dx, dy);
+    default: // 念のためデフォルトはじっと見つめる
+      calculateStarePattern(now, t0, dx, dy);
       break;
   }
+  
+  // 現在位置を共有変数に保存（モード変更時に使用）
+  sharedPositionX = dx;
+  sharedPositionY = dy;
   // Optimize square root calculation
   float dx_squared = dx*dx;
   float dy_squared = dy*dy;
@@ -721,8 +811,23 @@ void loop()
   float dz = sqrtf(max(0.0f, 1.0f - dx_squared - dy_squared));
 #endif
 
+  // Calculate initial iris position
   int ix = CENTER_X + (int)((R - r*B_MIN) * dx);
   int iy = CENTER_Y + (int)((R - r*B_MIN) * dy);
+  
+  // Ensure iris is at least 3/5*r away from eyeball center
+  float min_distance = 3.0f * r / 5.0f;  // Minimum required distance (3/5*r)
+  float dx_center = ix - CENTER_X;
+  float dy_center = iy - CENTER_Y;
+  float current_distance = sqrt(dx_center*dx_center + dy_center*dy_center);
+  
+  // If iris is too close to center, move it outward
+  if (current_distance < min_distance && current_distance > 0) {
+    float scale_factor = min_distance / current_distance;
+    ix = CENTER_X + (int)(dx_center * scale_factor);
+    iy = CENTER_Y + (int)(dy_center * scale_factor);
+  }
+  
   int a  = r;
   int b  = (int)(r * (B_MIN + (1.0f - B_MIN) * dz));
 #ifdef TRIG_TABLE
