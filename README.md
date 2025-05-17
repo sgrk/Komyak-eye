@@ -115,13 +115,7 @@ The project uses an optimized rendering approach:
 
 [MIT License](LICENSE)
 
-## Credits
 
-Developed by [Your Name/Organization]
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
@@ -240,10 +234,4 @@ const int PATTERN_WEIGHTS[] = {20, 10, 10, 10, 50};  // 合計が100になるよ
 
 [MITライセンス](LICENSE)
 
-## クレジット
 
-開発者：[あなたの名前/組織]
-
-## 貢献
-
-貢献は歓迎します！お気軽にプルリクエストを提出してください。
