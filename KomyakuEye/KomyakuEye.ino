@@ -17,7 +17,7 @@
  *  LovyanGFX版に変更
  *********************************************************************/
 #include <LovyanGFX.hpp>
-#define DEBUG                         // ← ログ不要ならコメントアウト
+//#define DEBUG                         // ← ログ不要ならコメントアウト
 #define OPTIMIZE_DRAWING              // ← 描画最適化を有効にする
 #define OPTIMIZE_MEMORY               // ← メモリ使用量を最適化する
 #define USE_DMA                       // ← DMA転送を使用する (必要に応じてコメント解除)
@@ -107,7 +107,7 @@ const int SCREEN_HEIGHT = 240;
 const int BUFFER_SIZE = (SCREEN_WIDTH * SCREEN_HEIGHT + 7) / 8;
 // Center coordinates
 const int CENTER_X = 120;
-const int CENTER_Y = 120;
+const int CENTER_Y = R;  // Shifted upward by 120-R pixels
 
 /* --- Eye Movement Patterns -------------------------------------- */
 // パターン関連の定数
