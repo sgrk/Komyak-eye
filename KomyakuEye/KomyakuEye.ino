@@ -97,9 +97,9 @@ public:
 LGFX gfx;
 
 /* --- Eye Parameters ---------------------------------------------- */
-const int R  = 95;          // eyeball radius
+const int R  = 90;          // eyeball radius
 const int r  =  45;          // iris radius
-const float B_MIN = 0.60f;   // min b/a (side view)
+const float B_MIN = 0.75f;   // min b/a (side view)
 // Screen dimensions
 const int SCREEN_WIDTH = 240;
 const int SCREEN_HEIGHT = 240;
