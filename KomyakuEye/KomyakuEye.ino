@@ -128,7 +128,10 @@ float targetDistance = 0.0f;  // 目標距離 (3/5*r から R-r*B_MIN の範囲)
 float targetAngle = 0.0f;     // 目標角度 (ラジアン)
 float currentDistance = 0.0f; // 現在の距離
 float currentAngle = 0.0f;    // 現在の角度 (ラジアン)
-float moveSpeed = 0.0f;       // 移動速度
+float distanceDiff = 0.0f;    // 1サイクルあたりの距離の移動量
+float angleDiff = 0.0f;       // 1サイクルあたりの角度の移動量
+int remainingCycles = 0;      // 目標位置に到達するまでの残りサイクル数
+float moveSpeed = 0.0f;       // 移動速度（1サイクルあたりの移動量の計算に使用）
 bool needNewTarget = true;    // 新しい目標が必要かどうか
 
 // 共有位置情報（モード変更時に使用）
@@ -507,7 +510,7 @@ void calculateMovingPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
   }
   
   // 新しい目標が必要か、または一定時間経過したら新しい目標を設定
-  if (needNewTarget || now - lastTargetChangeTime > 5000) {
+  if (needNewTarget || now - lastTargetChangeTime > 10000) {
     // 目標距離を3/5*rからR-r*B_MINの範囲でランダムに設定
     float min_distance = 3.0f * r / 5.0f;
     float max_distance = R - r * B_MIN;
@@ -518,6 +521,51 @@ void calculateMovingPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
     
     // 移動速度をランダムに設定（0.01〜0.05の範囲）
     moveSpeed = 0.01f + random(80) / 1000.0f;
+    
+    // 目標位置までの距離と角度の差を計算
+    float totalDistanceDiff = targetDistance - currentDistance;
+    float totalAngleDiff = targetAngle - currentAngle;
+    
+    // 角度差を-πからπの範囲に正規化（最短経路を計算）
+    float shortestAngleDiff = totalAngleDiff;
+    while (shortestAngleDiff > PI) shortestAngleDiff -= TWO_PI;
+    while (shortestAngleDiff < -PI) shortestAngleDiff += TWO_PI;
+    
+    // 長い方の経路を計算
+    float longerAngleDiff = (shortestAngleDiff > 0) ? shortestAngleDiff - TWO_PI : shortestAngleDiff + TWO_PI;
+    
+    // 3/4の確率で最短経路、1/4の確率で長い方の経路を選択
+    if (random(4) < 3) {
+      // 75%の確率で最短経路を選択
+      totalAngleDiff = shortestAngleDiff;
+#ifdef DEBUG
+      Serial.println(F("Selected shortest path for rotation"));
+#endif
+    } else {
+      // 25%の確率で長い方の経路を選択
+      totalAngleDiff = longerAngleDiff;
+#ifdef DEBUG
+      Serial.println(F("Selected longer path for rotation"));
+#endif
+    }
+    
+    // 目標位置に到達するまでのサイクル数を計算
+    // 距離と角度の両方が目標に到達するように調整
+    float distanceSteps = fabs(totalDistanceDiff) / moveSpeed;
+    float angleSteps = fabs(totalAngleDiff) / moveSpeed;
+    remainingCycles = max((int)distanceSteps, (int)angleSteps);
+    
+    // 最小サイクル数を設定（あまりに短いと不自然な動きになるため）
+    remainingCycles = max(remainingCycles, 20);
+    
+    // 1サイクルあたりの移動量を計算（一定速度になるように）
+    if (remainingCycles > 0) {
+      distanceDiff = totalDistanceDiff / remainingCycles;
+      angleDiff = totalAngleDiff / remainingCycles;
+    } else {
+      distanceDiff = 0.0f;
+      angleDiff = 0.0f;
+    }
     
     // 現在位置がまだ初期化されていない場合は初期化
     if (!positionInitialized) {
@@ -553,26 +601,28 @@ void calculateMovingPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
 #endif
   }
   
-  // 現在の角度から目標角度への最短経路を計算
-  float angleDiff = targetAngle - currentAngle;
-  
-  // 角度差を-πからπの範囲に正規化（最短経路を選択）
-  while (angleDiff > PI) angleDiff -= TWO_PI;
-  while (angleDiff < -PI) angleDiff += TWO_PI;
-  
-  // 角度と距離を目標に向かって徐々に更新
-  currentAngle += angleDiff * moveSpeed;
-  
-  // 角度を0〜2πの範囲に正規化
-  while (currentAngle < 0) currentAngle += TWO_PI;
-  while (currentAngle >= TWO_PI) currentAngle -= TWO_PI;
-  
-  // 距離も目標に向かって更新
-  float distanceDiff = targetDistance - currentDistance;
-  currentDistance += distanceDiff * moveSpeed;
-  
-  // 目標に十分近づいたら新しい目標を設定するフラグを立てる
-  if (abs(distanceDiff) < 1.0f && abs(angleDiff) < 0.1f) {
+  // 目標位置に到達するまでの残りサイクル数がある場合は移動を続ける
+  if (remainingCycles > 0) {
+    // 一定の速度で角度と距離を更新
+    currentAngle += angleDiff;
+    currentDistance += distanceDiff;
+    
+    // 角度を0〜2πの範囲に正規化
+    while (currentAngle < 0) currentAngle += TWO_PI;
+    while (currentAngle >= TWO_PI) currentAngle -= TWO_PI;
+    
+    // 残りサイクル数を減らす
+    remainingCycles--;
+    
+    // 残りサイクル数が0になったら目標に到達したと判断
+    if (remainingCycles <= 0) {
+      // 正確に目標位置に設定（浮動小数点の誤差を防ぐため）
+      currentAngle = targetAngle;
+      currentDistance = targetDistance;
+      needNewTarget = true;
+    }
+  } else {
+    // 既に目標に到達している場合は新しい目標を設定
     needNewTarget = true;
   }
   
