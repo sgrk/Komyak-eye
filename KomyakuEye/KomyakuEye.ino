@@ -17,7 +17,7 @@
  *  LovyanGFX版に変更
  *********************************************************************/
 #include <LovyanGFX.hpp>
-//#define DEBUG                         // ← ログ不要ならコメントアウト
+#define DEBUG                         // ← ログ不要ならコメントアウト
 #define OPTIMIZE_DRAWING              // ← 描画最適化を有効にする
 #define OPTIMIZE_MEMORY               // ← メモリ使用量を最適化する
 #define USE_DMA                       // ← DMA転送を使用する (必要に応じてコメント解除)
@@ -111,17 +111,22 @@ const int CENTER_Y = min(120,R+10);  // Shifted upward by 120-R pixels
 
 /* --- Eye Movement Patterns -------------------------------------- */
 // パターン関連の定数
-const int PATTERN_COUNT = 2;  // パターンの総数 (0: 移動, 1: じっと見つめる)
+const int PATTERN_COUNT = 3;  // パターンの総数 (0: 移動, 1: じっと見つめる, 2: 往復)
 const unsigned long PATTERN_CHANGE_INTERVAL = 10000;  // パターン切り替え間隔（ミリ秒）
 
 // パターンの重み（確率）を定義
-// パターン0（移動）: 30%, パターン1（じっと見つめる）: 70%
-const int PATTERN_WEIGHTS[] = {30, 70};  // 合計100になるようにする
+// パターン0（移動）: 30%, パターン1（じっと見つめる）: 50%, パターン2（往復）: 20%
+const int PATTERN_WEIGHTS[] = {30, 50, 20};  // 合計100になるようにする
 
 // パターン関連の変数
-int currentPattern = 0;  // 現在のパターン（0: 移動, 1: じっと見つめる）
+int currentPattern = 0;  // 現在のパターン（0: 移動, 1: じっと見つめる, 2: 往復）
 int previousPattern = 0; // 前回のパターン（モード変更時の位置共有用）
 unsigned long lastPatternChangeTime = 0;  // 最後にパターンを変更した時間
+
+// 往復パターン用の変数
+float originalDistance = 0.0f;  // 出発地点の距離
+float originalAngle = 0.0f;     // 出発地点の角度 (ラジアン)
+bool isReturning = false;       // 往路か復路か（false: 往路, true: 復路）
 
 // 移動パターン用の変数
 float targetDistance = 0.0f;  // 目標距離 (3/5*r から R-r*B_MIN の範囲)
@@ -686,6 +691,186 @@ void calculateStarePattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
   dy = baseY + microMovementY;
 }
 
+// パターン2: 往復パターン（目標位置に移動して元の位置に戻る）
+void calculateRoundTripPattern(uint32_t now, uint32_t t0, float &dx, float &dy) {
+  static uint32_t lastTargetChangeTime = 0;
+  
+  // パターン変更直後に現在位置を初期化
+  if (previousPattern != currentPattern && positionInitialized) {
+    // 共有された位置情報から現在の距離と角度を計算
+    float dx_actual = (R - r*B_MIN) * sharedPositionX;
+    float dy_actual = (R - r*B_MIN) * sharedPositionY;
+    
+    // 極座標に変換
+    currentDistance = sqrt(dx_actual*dx_actual + dy_actual*dy_actual);
+    if (currentDistance > 0) {
+      currentAngle = atan2(dy_actual, dx_actual);
+    } else {
+      // 中心にいる場合は適当な角度から開始
+      currentAngle = 0;
+      currentDistance = 3.0f * r / 5.0f; // 最小距離から開始
+    }
+    
+    // 出発地点を記録
+    originalDistance = currentDistance;
+    originalAngle = currentAngle;
+    
+    // 往路から開始
+    isReturning = false;
+    
+    // 新しい目標を設定するフラグを立てる
+    needNewTarget = true;
+    
+    // パターン変更処理完了
+    previousPattern = currentPattern;
+    
+#ifdef DEBUG
+    Serial.println(F("Round-trip pattern initialized with shared position:"));
+    Serial.print(F("X: ")); Serial.print(sharedPositionX);
+    Serial.print(F(", Y: ")); Serial.println(sharedPositionY);
+#endif
+  }
+  
+  // 新しい目標が必要か、または一定時間経過したら新しい目標を設定
+  if (needNewTarget || now - lastTargetChangeTime > 10000) {
+    if (isReturning) {
+      // 復路: 元の位置に戻る
+      targetDistance = originalDistance;
+      targetAngle = originalAngle;
+      
+      // 次は往路に切り替え
+      isReturning = false;
+    } else {
+      // 往路: 新しい目標位置を設定
+      // 目標距離を3/5*rからR-r*B_MINの範囲でランダムに設定
+      float min_distance = 3.0f * r / 5.0f;
+      float max_distance = R - r * B_MIN;
+      targetDistance = min_distance + random(1000) / 1000.0f * (max_distance - min_distance);
+      
+      // 目標角度を0〜2πの範囲でランダムに設定
+      targetAngle = random(1000) / 1000.0f * TWO_PI;
+      
+      // 次は復路に切り替え
+      isReturning = true;
+    }
+    
+    // 移動速度をランダムに設定（0.1〜0.2の範囲）
+    moveSpeed = 0.1f + random(10) / 100.0f;
+    
+    // 目標位置までの距離と角度の差を計算
+    float totalDistanceDiff = targetDistance - currentDistance;
+    float totalAngleDiff = targetAngle - currentAngle;
+    
+    // 角度差を-πからπの範囲に正規化（最短経路を計算）
+    float shortestAngleDiff = totalAngleDiff;
+    while (shortestAngleDiff > PI) shortestAngleDiff -= TWO_PI;
+    while (shortestAngleDiff < -PI) shortestAngleDiff += TWO_PI;
+    
+    
+    // 必ず最短経路
+    totalAngleDiff = shortestAngleDiff;
+
+      
+    // 目標位置に到達するまでのサイクル数を計算
+    // 距離と角度の両方が目標に到達するように調整
+    float distanceSteps = fabs(totalDistanceDiff) / moveSpeed;
+    float angleSteps = fabs(totalAngleDiff) / moveSpeed;
+    remainingCycles = max((int)distanceSteps, (int)angleSteps);
+    
+    // 最小サイクル数を設定（あまりに短いと不自然な動きになるため）
+    remainingCycles = max(remainingCycles, 20);
+    
+    // 1サイクルあたりの移動量を計算（一定速度になるように）
+    if (remainingCycles > 0) {
+      distanceDiff = totalDistanceDiff / remainingCycles;
+      angleDiff = totalAngleDiff / remainingCycles;
+    } else {
+      distanceDiff = 0.0f;
+      angleDiff = 0.0f;
+    }
+    
+    // 現在位置がまだ初期化されていない場合は初期化
+    if (!positionInitialized) {
+      // 現在位置を取得（dx, dyから極座標に変換）
+      float dx_norm = dx;
+      float dy_norm = dy;
+      
+      // 正規化された座標から実際の距離と角度を計算
+      float dx_actual = (R - r*B_MIN) * dx_norm;
+      float dy_actual = (R - r*B_MIN) * dy_norm;
+      
+      // 極座標に変換
+      currentDistance = sqrt(dx_actual*dx_actual + dy_actual*dy_actual);
+      if (currentDistance > 0) {
+        currentAngle = atan2(dy_actual, dx_actual);
+      } else {
+        // 中心にいる場合は適当な角度から開始
+        currentAngle = 0;
+        currentDistance = 3.0f * r / 5.0f; // 最小距離から開始
+      }
+      
+      // 出発地点を記録
+      originalDistance = currentDistance;
+      originalAngle = currentAngle;
+      
+      positionInitialized = true;
+    }
+    
+    needNewTarget = false;
+    lastTargetChangeTime = now;
+    
+#ifdef DEBUG
+    Serial.println(F("New target set:"));
+    Serial.print(F("Distance: ")); Serial.println(targetDistance);
+    Serial.print(F("Angle: ")); Serial.println(targetAngle);
+    Serial.print(F("Speed: ")); Serial.println(moveSpeed);
+    Serial.print(F("Direction: ")); Serial.println(isReturning ? "Returning" : "Going");
+#endif
+  }
+  
+  // 目標位置に到達するまでの残りサイクル数がある場合は移動を続ける
+  if (remainingCycles > 0) {
+    // 一定の速度で角度と距離を更新
+    currentAngle += angleDiff;
+    currentDistance += distanceDiff;
+    
+    // 角度を0〜2πの範囲に正規化
+    while (currentAngle < 0) currentAngle += TWO_PI;
+    while (currentAngle >= TWO_PI) currentAngle -= TWO_PI;
+    
+    // 残りサイクル数を減らす
+    remainingCycles--;
+    
+    // 残りサイクル数が0になったら目標に到達したと判断
+    if (remainingCycles <= 0) {
+      // 正確に目標位置に設定（浮動小数点の誤差を防ぐため）
+      currentAngle = targetAngle;
+      currentDistance = targetDistance;
+      needNewTarget = true;
+    }
+  } else {
+    // 既に目標に到達している場合は新しい目標を設定
+    needNewTarget = true;
+  }
+  
+  // 極座標から直交座標に変換
+#ifdef TRIG_TABLE
+  float cos_angle = fastCos(currentAngle);
+  float sin_angle = fastSin(currentAngle);
+#else
+  float cos_angle = cosf(currentAngle);
+  float sin_angle = sinf(currentAngle);
+#endif
+  
+  // 正規化された座標に変換（-1.0〜1.0の範囲）
+  dx = (currentDistance * cos_angle) / (R - r*B_MIN);
+  dy = (currentDistance * sin_angle) / (R - r*B_MIN);
+  
+  // 値の範囲を制限
+  dx = constrain(dx, -1.0f, 1.0f);
+  dy = constrain(dy, -1.0f, 1.0f);
+}
+
 void setup()
 {
 #ifdef DEBUG
@@ -831,6 +1016,12 @@ void loop()
       selectRandomPattern();
       lastPatternChangeTime = now;
     }
+  } else if (currentPattern == 2) {
+    // パターン2（往復）: 元の位置に戻ってきたときのみパターン変更可能
+    if (needNewTarget && !isReturning && now - lastPatternChangeTime > PATTERN_CHANGE_INTERVAL) {
+      selectRandomPattern();
+      lastPatternChangeTime = now;
+    }
   }
 
   /* --- 現在のパターンに基づいて動きを計算 ----------------------- */
@@ -843,6 +1034,9 @@ void loop()
       break;
     case 1: // じっと見つめるパターン
       calculateStarePattern(now, t0, dx, dy);
+      break;
+    case 2: // 往復パターン
+      calculateRoundTripPattern(now, t0, dx, dy);
       break;
     default: // 念のためデフォルトはじっと見つめる
       calculateStarePattern(now, t0, dx, dy);
